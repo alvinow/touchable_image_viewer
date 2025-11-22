@@ -1,6 +1,6 @@
 name: touchable_image_viewer
 description: A powerful Flutter web image viewer widget with Instagram-like gestures, supporting multiple formats including JPG, PNG, WebP, GIF, SVG, DXF, and 3D STL files.
-version: 0.1.0
+version: 0.1.1
 homepage: https://github.com/yourusername/touchable_image_viewer
 
 environment:
