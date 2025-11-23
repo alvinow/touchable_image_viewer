@@ -11,7 +11,7 @@ import '../shared/renderers/raster_image_renderer.dart';
 import '../shared/renderers/svg_renderer.dart';
 import '../desktop/desktop_toolbar.dart';
 
-/// Desktop-optimized image viewer with mouse and touchpad support
+/// Desktop-optimized image viewer with improved multi-touch support
 class DesktopImageViewer extends StatefulWidget {
   final ImageSource imageSource;
   final ViewerConfig config;
@@ -41,9 +41,31 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
   BackgroundStyle _currentBackgroundStyle = BackgroundStyle.checkered;
   Color _currentBackgroundColor = Colors.white;
 
-  double _baseScale = 1.0;
+  // Gesture state
+  double _gestureStartScale = 1.0;
   double _currentScale = 1.0;
+  Offset _gestureStartFocalPoint = Offset.zero;
   Offset _previousFocalPoint = Offset.zero;
+
+  // Zoom detection
+  double _previousScale = 1.0;
+  bool _isZooming = false;
+  int _zoomStableFrames = 0;
+  static const int _zoomStableThreshold = 3; // Frames before considering zoom stopped
+
+  // Pan state
+  Offset _currentTranslation = Offset.zero;
+
+  // Momentum/Inertia
+  Offset _velocity = Offset.zero;
+  Offset _lastPanPosition = Offset.zero;
+  DateTime _lastPanTime = DateTime.now();
+  AnimationController? _momentumController;
+  Animation<Offset>? _momentumAnimation;
+
+  // Reset animation
+  AnimationController? _resetController;
+  Animation<Matrix4>? _resetAnimation;
 
   bool _isImageLoaded = false;
 
@@ -63,10 +85,24 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
       bytes: widget.imageSource.bytes,
       filename: widget.imageSource.effectiveFilename,
     );
+
+    // Initialize momentum controller
+    _momentumController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
+
+    // Initialize reset controller
+    _resetController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    );
   }
 
   @override
   void dispose() {
+    _momentumController?.dispose();
+    _resetController?.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -150,7 +186,11 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
           }
         },
         child: AnimatedBuilder(
-          animation: _controller,
+          animation: Listenable.merge([
+            _controller,
+            _momentumController!,
+            _resetController!,
+          ]),
           builder: (context, child) {
             return Transform(
               transform: _controller.transformationController.value,
@@ -202,43 +242,202 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
   }
 
   void _handleScaleStart(ScaleStartDetails details) {
-    _baseScale = _currentScale;
+    // Cancel any ongoing animations
+    _momentumController?.stop();
+    _resetController?.stop();
+
+    _gestureStartScale = _currentScale;
+    _previousScale = 1.0;
+    _gestureStartFocalPoint = details.focalPoint;
     _previousFocalPoint = details.focalPoint;
+    _isZooming = false;
+    _zoomStableFrames = 0;
+
+    // Initialize pan tracking
+    _lastPanPosition = details.focalPoint;
+    _lastPanTime = DateTime.now();
+    _velocity = Offset.zero;
   }
 
   void _handleScaleUpdate(ScaleUpdateDetails details) {
+    final now = DateTime.now();
+
+    // Detect if zooming is happening
+    final scaleChanged = (details.scale - _previousScale).abs() > 0.001;
+
+    if (scaleChanged) {
+      _isZooming = true;
+      _zoomStableFrames = 0;
+    } else {
+      _zoomStableFrames++;
+      if (_zoomStableFrames >= _zoomStableThreshold) {
+        _isZooming = false;
+      }
+    }
+
+    _previousScale = details.scale;
+
     setState(() {
-      if (widget.config.enableZoom && details.scale != 1.0) {
-        // Touchscreen pinch or trackpad gesture
-        final newScale = _baseScale * details.scale;
-        _currentScale = _controller.clampScale(newScale);
-
-        final matrix = Matrix4.identity();
-        final focal = details.localFocalPoint;
-        matrix.translate(focal.dx, focal.dy);
-        matrix.scale(_currentScale);
-        matrix.translate(-focal.dx, -focal.dy);
-
-        _controller.transformationController.value = matrix;
-        _controller.updateScale(_currentScale);
-
-        widget.onScaleChanged?.call(_currentScale);
-      } else if (widget.config.enablePan && _currentScale > 1.0) {
-        // Click and drag to pan
-        final delta = details.focalPoint - _previousFocalPoint;
-        final currentMatrix = _controller.transformationController.value;
-
-        final newMatrix = Matrix4.copy(currentMatrix)
-          ..translate(delta.dx, delta.dy);
-
-        _controller.transformationController.value = newMatrix;
-        _previousFocalPoint = details.focalPoint;
+      // PHASE 1: Handle Zoom (priority)
+      if (widget.config.enableZoom && _isZooming) {
+        _handleZoom(details);
+      }
+      // PHASE 2: Handle Pan (only when zoom is stable)
+      else if (widget.config.enablePan && !_isZooming) {
+        _handlePan(details, now);
       }
     });
+
+    _previousFocalPoint = details.focalPoint;
+  }
+
+  void _handleZoom(ScaleUpdateDetails details) {
+    // Calculate new scale
+    final newScale = _gestureStartScale * details.scale;
+    final clampedScale = _controller.clampScale(newScale);
+
+    // Get the focal point in local coordinates
+    final focalPoint = details.localFocalPoint;
+
+    // Build transformation matrix that zooms toward focal point
+    final matrix = Matrix4.identity();
+
+    // 1. Translate so focal point is at origin
+    matrix.translate(focalPoint.dx, focalPoint.dy);
+
+    // 2. Apply scale
+    matrix.scale(clampedScale);
+
+    // 3. Apply current translation (preserve pan)
+    matrix.translate(_currentTranslation.dx / clampedScale,
+        _currentTranslation.dy / clampedScale);
+
+    // 4. Translate back
+    matrix.translate(-focalPoint.dx, -focalPoint.dy);
+
+    _currentScale = clampedScale;
+    _controller.transformationController.value = matrix;
+    _controller.updateScale(_currentScale);
+
+    widget.onScaleChanged?.call(_currentScale);
+  }
+
+  void _handlePan(ScaleUpdateDetails details, DateTime now) {
+    // Calculate velocity for momentum
+    final timeDelta = now.difference(_lastPanTime).inMilliseconds;
+    if (timeDelta > 0) {
+      final delta = details.focalPoint - _lastPanPosition;
+      _velocity = Offset(
+        delta.dx / timeDelta * 1000, // pixels per second
+        delta.dy / timeDelta * 1000,
+      );
+    }
+
+    _lastPanPosition = details.focalPoint;
+    _lastPanTime = now;
+
+    // Calculate pan delta
+    final delta = details.focalPoint - _previousFocalPoint;
+    _currentTranslation += delta;
+
+    // Apply transformation with current scale and translation
+    final matrix = Matrix4.identity();
+    matrix.translate(_currentTranslation.dx, _currentTranslation.dy);
+    matrix.scale(_currentScale);
+
+    _controller.transformationController.value = matrix;
   }
 
   void _handleScaleEnd(ScaleEndDetails details) {
-    // Could add momentum animation
+    // Start momentum animation if velocity is significant
+    final velocityMagnitude = _velocity.distance;
+
+    if (velocityMagnitude > 50 && !_isZooming) {
+      _startMomentumAnimation();
+    } else {
+      // No significant momentum, just reset
+      _animateResetToFit();
+    }
+  }
+
+  void _startMomentumAnimation() {
+    _momentumController!.reset();
+
+    // Calculate deceleration (friction)
+    final friction = 0.95; // Decay factor per frame at 60fps
+    final duration = 500; // milliseconds
+
+    final startTranslation = _currentTranslation;
+    final velocityDecay = math.pow(friction, duration / 16.67); // ~60fps
+
+    // Calculate end position based on velocity with decay
+    final momentumDistance = Offset(
+      _velocity.dx * duration / 1000 * (1 - velocityDecay) / (1 - friction),
+      _velocity.dy * duration / 1000 * (1 - velocityDecay) / (1 - friction),
+    );
+
+    final endTranslation = startTranslation + momentumDistance;
+
+    _momentumAnimation = Tween<Offset>(
+      begin: startTranslation,
+      end: endTranslation,
+    ).animate(CurvedAnimation(
+      parent: _momentumController!,
+      curve: Curves.decelerate,
+    ));
+
+    _momentumController!.addListener(() {
+      setState(() {
+        _currentTranslation = _momentumAnimation!.value;
+
+        final matrix = Matrix4.identity();
+        matrix.translate(_currentTranslation.dx, _currentTranslation.dy);
+        matrix.scale(_currentScale);
+
+        _controller.transformationController.value = matrix;
+      });
+    });
+
+    _momentumController!.forward().then((_) {
+      // After momentum, reset to fit
+      _animateResetToFit();
+    });
+  }
+
+  void _animateResetToFit() {
+    _resetController!.reset();
+
+    final startMatrix = _controller.transformationController.value;
+    final endMatrix = Matrix4.identity(); // Reset to fit
+
+    _resetAnimation = Matrix4Tween(
+      begin: startMatrix,
+      end: endMatrix,
+    ).animate(CurvedAnimation(
+      parent: _resetController!,
+      curve: Curves.easeInOut,
+    ));
+
+    _resetController!.addListener(() {
+      setState(() {
+        _controller.transformationController.value = _resetAnimation!.value;
+
+        // Extract scale from matrix for callbacks
+        final matrix = _resetAnimation!.value;
+        final scaleX = matrix.getMaxScaleOnAxis();
+        _currentScale = scaleX;
+        _controller.updateScale(_currentScale);
+
+        widget.onScaleChanged?.call(_currentScale);
+      });
+    });
+
+    _resetController!.forward().then((_) {
+      // Reset state
+      _currentScale = 1.0;
+      _currentTranslation = Offset.zero;
+      _controller.resetToFit();
+    });
   }
 
   void _handleDoubleTap(Offset localPosition) {
@@ -249,19 +448,21 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
   }
 
   void _handleMouseScroll(PointerScrollEvent event) {
-    // Mouse wheel zoom
+    // Mouse wheel zoom - zoom toward cursor
     final delta = event.scrollDelta.dy;
     final zoomChange = delta > 0 ? 0.9 : 1.1;
 
     final newScale = _controller.clampScale(_currentScale * zoomChange);
+    final focal = event.localPosition;
 
     setState(() {
       _currentScale = newScale;
 
       final matrix = Matrix4.identity();
-      final focal = event.localPosition;
       matrix.translate(focal.dx, focal.dy);
       matrix.scale(_currentScale);
+      matrix.translate(_currentTranslation.dx / _currentScale,
+          _currentTranslation.dy / _currentScale);
       matrix.translate(-focal.dx, -focal.dy);
 
       _controller.transformationController.value = matrix;
