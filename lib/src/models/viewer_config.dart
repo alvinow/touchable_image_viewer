@@ -46,6 +46,7 @@ class ViewerConfig {
   final double desktopBreakpoint;
 
   const ViewerConfig({
+
     this.mobileBreakpoint=768,
     this.desktopBreakpoint=1024,
 

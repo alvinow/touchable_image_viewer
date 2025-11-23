@@ -11,7 +11,7 @@ import '../shared/renderers/raster_image_renderer.dart';
 import '../shared/renderers/svg_renderer.dart';
 import '../desktop/desktop_toolbar.dart';
 
-/// Advanced Desktop/Web-optimized image viewer with pointer event handling
+/// Desktop-optimized image viewer with mouse and touchpad support
 class DesktopImageViewer extends StatefulWidget {
   final ImageSource imageSource;
   final ViewerConfig config;
@@ -41,36 +41,9 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
   BackgroundStyle _currentBackgroundStyle = BackgroundStyle.checkered;
   Color _currentBackgroundColor = Colors.white;
 
-  // Advanced pointer tracking
-  final Map<int, PointerEvent> _activePointers = {};
-  PointerDeviceKind? _detectedDeviceKind;
-
-  // Gesture state
-  double _gestureStartScale = 1.0;
+  double _baseScale = 1.0;
   double _currentScale = 1.0;
-  Offset _gestureStartFocalPoint = Offset.zero;
-  Offset _gestureStartTranslation = Offset.zero;
   Offset _previousFocalPoint = Offset.zero;
-
-  // Zoom detection with velocity tracking
-  double _previousScale = 1.0;
-  double _scaleVelocity = 0.0;
-  static const double _zoomVelocityThreshold = 0.005;
-
-  // Pan state
-  Offset _currentTranslation = Offset.zero;
-  Offset _previousPointerDelta = Offset.zero;
-
-  // Inertia with adaptive dampening
-  Offset _velocity = Offset.zero;
-  Offset _lastPanPosition = Offset.zero;
-  DateTime _lastPanTime = DateTime.now();
-  AnimationController? _momentumController;
-  Animation<Offset>? _momentumAnimation;
-
-  // Reset animation
-  AnimationController? _resetController;
-  Animation<Matrix4>? _resetAnimation;
 
   bool _isImageLoaded = false;
 
@@ -90,17 +63,11 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
       bytes: widget.imageSource.bytes,
       filename: widget.imageSource.effectiveFilename,
     );
-
-    _momentumController = AnimationController(vsync: this);
-    _resetController = AnimationController(vsync: this);
   }
 
   @override
   void dispose() {
-    _momentumController?.dispose();
-    _resetController?.dispose();
     _controller.dispose();
-    _activePointers.clear();
     super.dispose();
   }
 
@@ -115,7 +82,7 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
         return Stack(
           children: [
             _buildBackground(),
-            _buildAdvancedImageViewer(),
+            _buildImageViewer(),
             if (widget.config.showToolbar)
               DesktopToolbar(
                 config: widget.config,
@@ -131,61 +98,6 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
           ],
         );
       },
-    );
-  }
-
-  /// Advanced image viewer with pointer tracking and pan-zoom support
-  Widget _buildAdvancedImageViewer() {
-    return Listener(
-      // Raw pointer event handling for max precision on web
-      onPointerDown: _handlePointerDown,
-      onPointerMove: _handlePointerMove,
-      onPointerUp: _handlePointerUp,
-      onPointerCancel: _handlePointerCancel,
-      onPointerSignal: _handlePointerSignal,
-      // Pan-zoom support (Flutter 3.4+, trackpad gestures)
-      onPointerPanZoomStart: widget.config.enableZoom
-          ? _handlePanZoomStart
-          : null,
-      onPointerPanZoomUpdate: widget.config.enableZoom
-          ? _handlePanZoomUpdate
-          : null,
-      onPointerPanZoomEnd: widget.config.enableZoom
-          ? _handlePanZoomEnd
-          : null,
-      child: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onScaleStart: widget.config.enableZoom || widget.config.enablePan
-            ? _handleScaleStart
-            : null,
-        onScaleUpdate: widget.config.enableZoom || widget.config.enablePan
-            ? _handleScaleUpdate
-            : null,
-        onScaleEnd: widget.config.enableZoom || widget.config.enablePan
-            ? _handleScaleEnd
-            : null,
-        onDoubleTapDown: widget.config.enableDoubleTap
-            ? (details) => _handleDoubleTap(details.localPosition)
-            : null,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([
-            _controller,
-            _momentumController!,
-            _resetController!,
-          ]),
-          builder: (context, child) {
-            return Transform(
-              transform: _controller.transformationController.value,
-              alignment: Alignment.center,
-              child: Transform.rotate(
-                angle: _controller.rotationAngle * math.pi / 180,
-                alignment: Alignment.center,
-                child: _buildImageRenderer(),
-              ),
-            );
-          },
-        ),
-      ),
     );
   }
 
@@ -207,11 +119,52 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
             squareSize: widget.config.checkerSize,
           ),
         );
+
       case BackgroundStyle.solid:
         return Container(color: _currentBackgroundColor);
+
       case BackgroundStyle.custom:
         return Container(color: _currentBackgroundColor);
     }
+  }
+
+  Widget _buildImageViewer() {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onScaleStart: widget.config.enableZoom || widget.config.enablePan
+          ? _handleScaleStart
+          : null,
+      onScaleUpdate: widget.config.enableZoom || widget.config.enablePan
+          ? _handleScaleUpdate
+          : null,
+      onScaleEnd: widget.config.enableZoom || widget.config.enablePan
+          ? _handleScaleEnd
+          : null,
+      onDoubleTapDown: widget.config.enableDoubleTap
+          ? (details) => _handleDoubleTap(details.localPosition)
+          : null,
+      child: Listener(
+        onPointerSignal: (event) {
+          if (event is PointerScrollEvent && widget.config.enableZoom) {
+            _handleMouseScroll(event);
+          }
+        },
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, child) {
+            return Transform(
+              transform: _controller.transformationController.value,
+              alignment: Alignment.center,
+              child: Transform.rotate(
+                angle: _controller.rotationAngle * math.pi / 180,
+                alignment: Alignment.center,
+                child: _buildImageRenderer(),
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Widget _buildImageRenderer() {
@@ -248,265 +201,44 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
     }
   }
 
-  // ============== POINTER EVENT HANDLING ==============
-
-  void _handlePointerDown(PointerDownEvent event) {
-    _activePointers[event.pointer] = event;
-    _detectedDeviceKind = event.kind;
-  }
-
-  void _handlePointerMove(PointerMoveEvent event) {
-    _activePointers[event.pointer] = event;
-
-    // Track raw pointer delta for velocity calculation
-    _previousPointerDelta = event.localDelta;
-    _lastPanTime = DateTime.now();
-  }
-
-  void _handlePointerUp(PointerUpEvent event) {
-    _activePointers.remove(event.pointer);
-
-    // Apply momentum if all pointers released and velocity is high
-    if (_activePointers.isEmpty && _velocity.distance > 100) {
-      _startMomentumAnimation();
-    }
-  }
-
-  void _handlePointerCancel(PointerCancelEvent event) {
-    _activePointers.remove(event.pointer);
-  }
-
-  void _handlePointerSignal(PointerSignalEvent event) {
-    if (event is PointerScrollEvent && widget.config.enableZoom) {
-      _handleMouseWheel(event);
-    }
-  }
-
-  // ============== PAN-ZOOM GESTURE SUPPORT (Trackpad) ==============
-
-  void _handlePanZoomStart(PointerPanZoomStartEvent event) {
-    _momentumController?.stop();
-    _resetController?.stop();
-    _detectedDeviceKind = PointerDeviceKind.trackpad;
-    _gestureStartScale = _currentScale;
-    _gestureStartTranslation = _currentTranslation;
-  }
-
-  void _handlePanZoomUpdate(PointerPanZoomUpdateEvent event) {
-    setState(() {
-      // Trackpad pan-zoom combines both operations
-      final newScale = _controller.clampScale(
-        _gestureStartScale * event.scale,
-      );
-
-      // Apply translation from pan
-      final newTranslation = _gestureStartTranslation + event.pan;
-
-      _currentScale = newScale;
-      _currentTranslation = newTranslation;
-
-      // Update transformation matrix
-      final matrix = Matrix4.identity();
-      matrix.translate(newTranslation.dx, newTranslation.dy);
-      matrix.scale(newScale);
-      _controller.transformationController.value = matrix;
-
-      _controller.updateScale(_currentScale);
-      widget.onScaleChanged?.call(_currentScale);
-    });
-  }
-
-  void _handlePanZoomEnd(PointerPanZoomEndEvent event) {
-    _animateResetToFit();
-  }
-
-  // ============== TRADITIONAL GESTURE HANDLING ==============
-
   void _handleScaleStart(ScaleStartDetails details) {
-    _momentumController?.stop();
-    _resetController?.stop();
-
-    _gestureStartScale = _currentScale;
-    _previousScale = 1.0;
-    _scaleVelocity = 0.0;
-    _gestureStartFocalPoint = details.focalPoint;
+    _baseScale = _currentScale;
     _previousFocalPoint = details.focalPoint;
-
-    _lastPanPosition = details.focalPoint;
-    _lastPanTime = DateTime.now();
-    _velocity = Offset.zero;
   }
 
   void _handleScaleUpdate(ScaleUpdateDetails details) {
-    final now = DateTime.now();
-
-    // Velocity-based zoom detection (instead of frame counting)
-    _scaleVelocity = (details.scale - _previousScale).abs();
-    final isZoomGesture = _scaleVelocity > _zoomVelocityThreshold;
-
-    _previousScale = details.scale;
-
     setState(() {
-      if (widget.config.enableZoom && isZoomGesture) {
-        _handleZoomWithFocalPoint(details);
-      } else if (widget.config.enablePan && !isZoomGesture) {
-        _handlePanWithMomentum(details, now);
+      if (widget.config.enableZoom && details.scale != 1.0) {
+        // Touchscreen pinch or trackpad gesture
+        final newScale = _baseScale * details.scale;
+        _currentScale = _controller.clampScale(newScale);
+
+        final matrix = Matrix4.identity();
+        final focal = details.localFocalPoint;
+        matrix.translate(focal.dx, focal.dy);
+        matrix.scale(_currentScale);
+        matrix.translate(-focal.dx, -focal.dy);
+
+        _controller.transformationController.value = matrix;
+        _controller.updateScale(_currentScale);
+
+        widget.onScaleChanged?.call(_currentScale);
+      } else if (widget.config.enablePan && _currentScale > 1.0) {
+        // Click and drag to pan
+        final delta = details.focalPoint - _previousFocalPoint;
+        final currentMatrix = _controller.transformationController.value;
+
+        final newMatrix = Matrix4.copy(currentMatrix)
+          ..translate(delta.dx, delta.dy);
+
+        _controller.transformationController.value = newMatrix;
+        _previousFocalPoint = details.focalPoint;
       }
     });
-
-    _previousFocalPoint = details.focalPoint;
-  }
-
-  void _handleZoomWithFocalPoint(ScaleUpdateDetails details) {
-    final newScale = _gestureStartScale * details.scale;
-    final clampedScale = _controller.clampScale(newScale);
-    final focalPoint = details.localFocalPoint;
-
-    // Build matrix: zoom toward focal point with translation preservation
-    final matrix = Matrix4.identity();
-    matrix.translate(focalPoint.dx, focalPoint.dy);
-    matrix.scale(clampedScale);
-    matrix.translate(
-      _currentTranslation.dx / clampedScale,
-      _currentTranslation.dy / clampedScale,
-    );
-    matrix.translate(-focalPoint.dx, -focalPoint.dy);
-
-    _currentScale = clampedScale;
-    _controller.transformationController.value = matrix;
-    _controller.updateScale(_currentScale);
-    widget.onScaleChanged?.call(_currentScale);
-  }
-
-  void _handlePanWithMomentum(ScaleUpdateDetails details, DateTime now) {
-    // Calculate velocity for momentum
-    final timeDelta = now.difference(_lastPanTime).inMilliseconds;
-    if (timeDelta > 0) {
-      final delta = details.focalPoint - _lastPanPosition;
-      _velocity = Offset(
-        delta.dx / timeDelta * 1000,
-        delta.dy / timeDelta * 1000,
-      );
-    }
-
-    _lastPanPosition = details.focalPoint;
-    _lastPanTime = now;
-
-    final panDelta = details.focalPoint - _previousFocalPoint;
-    _currentTranslation += panDelta;
-
-    final matrix = Matrix4.identity();
-    matrix.translate(_currentTranslation.dx, _currentTranslation.dy);
-    matrix.scale(_currentScale);
-    _controller.transformationController.value = matrix;
   }
 
   void _handleScaleEnd(ScaleEndDetails details) {
-    final velocityMagnitude = _velocity.distance;
-
-    if (velocityMagnitude > 100 && !(_scaleVelocity > _zoomVelocityThreshold)) {
-      _startMomentumAnimation();
-    } else {
-      _animateResetToFit();
-    }
-  }
-
-  // ============== MOUSE WHEEL HANDLING ==============
-
-  void _handleMouseWheel(PointerScrollEvent event) {
-    final scrollDelta = event.scrollDelta.dy;
-    final zoomMultiplier = scrollDelta > 0 ? 0.9 : 1.1;
-    final newScale = _controller.clampScale(_currentScale * zoomMultiplier);
-
-    setState(() {
-      _currentScale = newScale;
-
-      final focal = event.localPosition;
-      final matrix = Matrix4.identity();
-      matrix.translate(focal.dx, focal.dy);
-      matrix.scale(_currentScale);
-      matrix.translate(
-        _currentTranslation.dx / _currentScale,
-        _currentTranslation.dy / _currentScale,
-      );
-      matrix.translate(-focal.dx, -focal.dy);
-
-      _controller.transformationController.value = matrix;
-      _controller.updateScale(_currentScale);
-      widget.onScaleChanged?.call(_currentScale);
-    });
-  }
-
-  // ============== MOMENTUM & ANIMATIONS ==============
-
-  void _startMomentumAnimation() {
-    _momentumController!.reset();
-
-    final duration = (100 + (_velocity.distance * 2).clamp(0.0, 400.0)).toInt();
-    _momentumController!.duration = Duration(milliseconds: duration);
-
-    final friction = _detectedDeviceKind == PointerDeviceKind.trackpad
-        ? 0.92
-        : 0.94;
-
-    final startTranslation = _currentTranslation;
-    final momentumDistance = _velocity * (duration / 1000) * 0.5;
-    final endTranslation = startTranslation + momentumDistance;
-
-    _momentumAnimation = Tween<Offset>(
-      begin: startTranslation,
-      end: endTranslation,
-    ).animate(CurvedAnimation(
-      parent: _momentumController!,
-      curve: Curves.decelerate,
-    ));
-
-    _momentumController!.addListener(() {
-      setState(() {
-        _currentTranslation = _momentumAnimation!.value;
-
-        final matrix = Matrix4.identity();
-        matrix.translate(_currentTranslation.dx, _currentTranslation.dy);
-        matrix.scale(_currentScale);
-        _controller.transformationController.value = matrix;
-      });
-    });
-
-    _momentumController!.forward().then((_) {
-      _animateResetToFit();
-    });
-  }
-
-  void _animateResetToFit() {
-    _resetController!.reset();
-    _resetController!.duration = const Duration(milliseconds: 400);
-
-    final startMatrix = _controller.transformationController.value;
-    final endMatrix = Matrix4.identity();
-
-    _resetAnimation = Matrix4Tween(
-      begin: startMatrix,
-      end: endMatrix,
-    ).animate(CurvedAnimation(
-      parent: _resetController!,
-      curve: Curves.easeInOut,
-    ));
-
-    _resetController!.addListener(() {
-      setState(() {
-        _controller.transformationController.value = _resetAnimation!.value;
-        final scaleX = _resetAnimation!.value.getMaxScaleOnAxis();
-        _currentScale = scaleX;
-        _controller.updateScale(_currentScale);
-        widget.onScaleChanged?.call(_currentScale);
-      });
-    });
-
-    _resetController!.forward().then((_) {
-      _currentScale = 1.0;
-      _currentTranslation = Offset.zero;
-      _controller.resetToFit();
-    });
+    // Could add momentum animation
   }
 
   void _handleDoubleTap(Offset localPosition) {
@@ -516,10 +248,34 @@ class _DesktopImageViewerState extends State<DesktopImageViewer>
     );
   }
 
+  void _handleMouseScroll(PointerScrollEvent event) {
+    // Mouse wheel zoom
+    final delta = event.scrollDelta.dy;
+    final zoomChange = delta > 0 ? 0.9 : 1.1;
+
+    final newScale = _controller.clampScale(_currentScale * zoomChange);
+
+    setState(() {
+      _currentScale = newScale;
+
+      final matrix = Matrix4.identity();
+      final focal = event.localPosition;
+      matrix.translate(focal.dx, focal.dy);
+      matrix.scale(_currentScale);
+      matrix.translate(-focal.dx, -focal.dy);
+
+      _controller.transformationController.value = matrix;
+      _controller.updateScale(_currentScale);
+
+      widget.onScaleChanged?.call(_currentScale);
+    });
+  }
+
   void _handleImageLoaded() {
     setState(() {
       _isImageLoaded = true;
     });
+
     widget.onImageLoaded?.call();
 
     if (widget.config.autoFitOnLoad) {
