@@ -69,3 +69,4 @@ export 'src/models/enums.dart';
 
 // Utilities (exposed for advanced usage)
 export 'src/utils/image_format_detector.dart';
+export 'src/utils/platform_detector.dart';

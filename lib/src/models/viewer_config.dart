@@ -41,7 +41,14 @@ class ViewerConfig {
   final bool enableAntiAlias;
   final bool enableCaching;
 
+  // Platform detection
+  final double mobileBreakpoint;
+  final double desktopBreakpoint;
+
   const ViewerConfig({
+    this.mobileBreakpoint=768,
+    this.desktopBreakpoint=1024,
+
     // Zoom
     this.minScale = 0.5,
     this.maxScale = 10.0,
